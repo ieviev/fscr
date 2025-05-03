@@ -3,19 +3,25 @@
 a wrapper around the F# compiler
 
 ```sh
-usage: fscr [-t exe|library] <script.fsx> (default: exe)
+usage: fscr [-t exe|library] <script.fsx / project.fsproj> (default: exe)
 ```
 
 the output is created into `bin/` and executed after compiling, 
 - with `-t library` a dll is created and not ran
 
-the reason to use this over `dotnet run` is: 
-- that it takes 300ms to recompile and run after changes (instead of 5-10 seconds!)
+the reason to use this over `dotnet build` or `dotnet run` is: 
+- that it takes 300ms to recompile and run after changes (instead of several seconds!)
 - all dll references are symlinked instead of copied
 - the compilation is done with an in-memory filesystem
 - the same compiler process is reused after first compilation
 
-example:
+example with unit tests in a project
+
+```
+todo
+```
+
+example with script
 
 https://github.com/user-attachments/assets/a84996e4-9867-424f-b283-b9d3c5d528a2
 

@@ -12,6 +12,7 @@
 
   <ItemGroup>
     <PackageReference Include="FSharp.Compiler.Service" Version="43.9.202" />
+    <PackageReference Include="Ionide.ProjInfo.FCS" Version="0.70.2" />
   </ItemGroup>
 
 </Project>
