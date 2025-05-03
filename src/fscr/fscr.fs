@@ -84,9 +84,14 @@ module Helpers =
     type Options = {
         mutable file_path: string option
         mutable target: string
+        mutable args: ResizeArray<string>
     } with
 
-        static member Default: Options = { file_path = None; target = "exe" }
+        static member Default: Options = {
+            file_path = None
+            target = "exe"
+            args = ResizeArray()
+        }
 
     let inline next(e: byref<System.Span.Enumerator<string>>) =
         if not (e.MoveNext()) then
@@ -99,6 +104,7 @@ module Helpers =
 
         while e.MoveNext() do
             match e.Current with
+            | arg when acc.file_path.IsSome -> acc.args.Add(arg)
             | "-t" -> acc.target <- next (&e)
             | s -> acc.file_path <- Some s
 
@@ -252,21 +258,61 @@ let copy_dlls_to_output
 
 
 module FCS =
-    let createChecker() =
-        FSharpChecker.Create(useTransparentCompiler = true)
+    let create_checker() =
+        FSharpChecker.Create(
+            useTransparentCompiler = true,
+            parallelReferenceResolution = true
+        )
+
+    let wait_for_tasks
+        (opts: Options)
+        (runtimeconf_path: string)
+        (dest_path: string)
+        (other_options: string seq)
+        (referenced_projects: string seq)
+        (prog: string)
+        (assembly: byte[])
+        : System.Threading.Tasks.Task =
+        System.Threading.Tasks.Task.WhenAll(
+            [|
+                if opts.target = "exe" && not (File.Exists(runtimeconf_path)) then
+                    File.WriteAllBytesAsync(runtimeconf_path, runtimeconfig)
+                copy_dlls_to_output dest_path other_options referenced_projects
+                File.WriteAllBytesAsync(prog, assembly)
+            |]
+        )
+
+    let try_run_exe (opts: Options) (prog: string) =
+        task {
+            if opts.target = "exe" then
+                let args =
+                    match opts.args.Count with
+                    | 0 -> prog
+                    | _ ->
+                        let argstr = opts.args |> String.concat " "
+                        $"{prog} {argstr}"
+
+                use ps = System.Diagnostics.Process.Start("dotnet", args)
+                do! ps.WaitForExitAsync()
+        }
 
 [<EntryPoint>]
 let main argv =
-    if Array.contains "--help" argv then
-        failwith $"usage: fscr [-t library|exe] <script.fsx>"
-
     let opts = parse_options Options.Default argv
+
+    if opts.file_path.IsNone then
+        stderr.WriteLine $"usage: fscr [-t exe|library] <script.fsx> [args]"
+        exit 1
+
     let dest_path = "bin/"
     Directory.CreateDirectory(dest_path) |> ignore
     let watch = System.Diagnostics.Stopwatch.StartNew()
 
-    let inline startup_msg() =
-        stdout.WriteLine $"target={opts.target}"
+    stdout.WriteLine $"target={opts.target}; args=%A{opts.args.ToArray()}"
+    let path = opts.file_path.Value
+    let scriptname = Path.GetFileNameWithoutExtension(path)
+    let runtimeconf_path = Path.Combine(dest_path, $"{scriptname}.runtimeconfig.json")
+    let checker = FCS.create_checker ()
 
     match opts.file_path with
     | Some path when path.EndsWith(".fsproj") ->
@@ -274,9 +320,6 @@ let main argv =
         let tools_path = Msbuild.tools_path path
         let loader = Msbuild.graph_loader tools_path
         let proj_option_list = loader.LoadProjects([ path ]) |> Seq.toArray
-        let scriptname = Path.GetFileNameWithoutExtension(path)
-        let runtimeconf_path = Path.Combine(dest_path, $"{scriptname}.runtimeconfig.json")
-        startup_msg ()
 
         let project_file_names =
             proj_option_list |> Array.map (fun v -> v.ProjectFileName)
@@ -303,22 +346,9 @@ let main argv =
                 if p.StartsWith("-o:") then
                     ()
 
-                if p.StartsWith("--debug:") then
-                    ()
-                else
-
-                if p.StartsWith("-r:/home/ian/.dotnet/packs") then
-                    ()
-                else
-
-                stdout.WriteLine p
-                // if p.Contains("/obj/") then
-                //     ()
-                // else
-                p
+                if p.StartsWith("--debug:") then () else p
         ]
 
-        let checker = FCS.createChecker ()
 
         let compile_project() =
             task {
@@ -328,27 +358,20 @@ let main argv =
                 let prog = Path.Combine(dest_path, $"{scriptname}.dll")
 
                 do!
-                    System.Threading.Tasks.Task.WhenAll(
-                        [|
-                            if
-                                opts.target = "exe" && not (File.Exists(runtimeconf_path))
-                            then
-                                File.WriteAllBytesAsync(runtimeconf_path, runtimeconfig)
-                            copy_dlls_to_output
-                                dest_path
-                                (filter_options proj_opts.OtherOptions)
-                                referenced_projects
-                            File.WriteAllBytesAsync(prog, result.assembly)
-                        |]
-                    )
+                    FCS.wait_for_tasks
+                        opts
+                        runtimeconf_path
+                        dest_path
+                        (filter_options proj_opts.OtherOptions)
+                        referenced_projects
+                        prog
+                        result.assembly
 
                 watch.Stop()
                 do! stdout.WriteLineAsync $" {watch.ElapsedMilliseconds}ms"
                 watch.Reset()
 
-                if opts.target = "exe" then
-                    use ps = System.Diagnostics.Process.Start("dotnet", prog)
-                    do! ps.WaitForExitAsync()
+                do! FCS.try_run_exe opts prog
             }
 
         compile_project().Wait()
@@ -357,10 +380,6 @@ let main argv =
 
     | Some path when path.EndsWith(".fsx") ->
 
-        let scriptname = Path.GetFileNameWithoutExtension(path)
-        let runtimeconf_path = Path.Combine(dest_path, $"{scriptname}.runtimeconfig.json")
-        startup_msg ()
-        let checker = FSharpChecker.Create(useTransparentCompiler = true)
 
         let compile_script() =
             task {
@@ -374,18 +393,15 @@ let main argv =
 
                 let prog = Path.Combine(dest_path, $"{scriptname}.dll")
 
-
                 do!
-                    System.Threading.Tasks.Task.WhenAll(
-                        [|
-                            if
-                                opts.target = "exe" && not (File.Exists(runtimeconf_path))
-                            then
-                                File.WriteAllBytesAsync(runtimeconf_path, runtimeconfig)
-                            copy_dlls_to_output dest_path (projOpts.OtherOptions) []
-                            File.WriteAllBytesAsync(prog, assembly)
-                        |]
-                    )
+                    FCS.wait_for_tasks
+                        opts
+                        runtimeconf_path
+                        dest_path
+                        projOpts.OtherOptions
+                        []
+                        prog
+                        assembly
 
                 watch.Stop()
                 do! stdout.WriteLineAsync $" {watch.ElapsedMilliseconds}ms"
