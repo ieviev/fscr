@@ -15,11 +15,11 @@ the reason to use this over `dotnet build` or `dotnet run` is:
 - the compilation is done with an in-memory filesystem
 - the same compiler process is reused after first compilation
 
-running unit tests in a project
+example: running unit tests in a project
 
 https://github.com/user-attachments/assets/ea93a3cc-12a2-46f0-9170-6ccef7299902
 
-running script
+example: running script
 
 https://github.com/user-attachments/assets/a84996e4-9867-424f-b283-b9d3c5d528a2
 
