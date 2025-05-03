@@ -10,24 +10,13 @@ open System.Reflection
 module Msbuild =
     open Ionide.ProjInfo
 
-    let toolsPath(fsproj_path: string) =
+    let tools_path(fsproj_path: string) =
         let dirname = Path.GetDirectoryName(fsproj_path)
         let dir = DirectoryInfo(dirname)
         Init.init dir None
 
-    let graphLoader(toolsPath) : IWorkspaceLoader =
-        WorkspaceLoaderViaProjectGraph.Create(toolsPath, [])
-
-    let subscribeNotifs(loader: IWorkspaceLoader) : System.IDisposable =
-        loader.Notifications.Subscribe(fun msg ->
-            // printfn "%A" msg
-            ())
-
-
-// let createProjOptions =
-//     ()
-// let asd = FCS.mapManyOptions projectOptions
-
+    let graph_loader(tools_path) : IWorkspaceLoader =
+        WorkspaceLoaderViaProjectGraph.Create(tools_path, [])
 
 [<AutoOpen>]
 module Helpers =
@@ -37,7 +26,7 @@ module Helpers =
     let dotnet_root =
         System.Environment.GetEnvironmentVariable("DOTNET_ROOT")
         |> Option.ofObj
-        |> Option.defaultWith (fun v -> failwith "set DOTNET_ROOT env variable")
+        |> Option.defaultWith (fun _ -> failwith "set DOTNET_ROOT env variable")
 
     let dotnet_packs_ref = "-r:" + Path.Combine(dotnet_root, "packs")
 
@@ -119,11 +108,12 @@ module Helpers =
 type MemoryFileSystem() =
     inherit FSharp.Compiler.IO.DefaultFileSystem()
 
-    member val InMemoryStream: MemoryStream = null with get, set
+    member val InMemoryStream: MemoryStream = new MemoryStream() with get, set
     member val PdbStream = new MemoryStream()
 
     override this.OpenFileForWriteShim(filePath, mode, _, _) =
         // stdout.WriteLine $"open_file: {filePath}, {mode}"
+
         if filePath.EndsWith(".pdb") then
             this.PdbStream
         else
@@ -131,19 +121,27 @@ type MemoryFileSystem() =
             | Some(FileMode.Create) ->
                 this.InMemoryStream <- new MemoryStream()
                 this.InMemoryStream
-            | Some(FileMode.Open) -> new MemoryStream()
+            | Some(FileMode.Open) ->
+                // this seems like not required
+                // this.InMemoryStream <- new MemoryStream(this.InMemoryStream.ToArray())
+                // this.InMemoryStream
+                MemoryStream.Null
             | _ -> failwith $"unexpected mode: {mode}"
 
 
-let tryCompileScriptInMemory (opts: Options) (fsxPath: string) (sourceText: ISourceText) =
+let try_compile_script
+    (opts: Options)
+    (fsxPath: string)
+    (sourceText: ISourceText)
+    (checker: FSharpChecker)
+    =
     let defaultFS = FSharp.Compiler.IO.FileSystemAutoOpens.FileSystem
     let memoryFS = MemoryFileSystem()
     FSharp.Compiler.IO.FileSystemAutoOpens.FileSystem <- memoryFS
-    let checker = FSharpChecker.Create()
     let sourceText = sourceText
 
     task {
-        let! projOpts, _ =
+        let! proj_opts, _ =
             checker.GetProjectOptionsFromScript(
                 fsxPath,
                 sourceText,
@@ -153,83 +151,80 @@ let tryCompileScriptInMemory (opts: Options) (fsxPath: string) (sourceText: ISou
             )
 
 
-        let filteredSourceFiles = projOpts.SourceFiles
-
-        let! compileResult, exitCode =
+        let! compile_result, exit_code =
             checker.Compile(
                 [|
-                    "filename.fsx"
+                    "fsc.exe"
                     $"--target:{opts.target}"
                     "--debug-"
                     "--optimize-"
                     "--nowin32manifest"
-                    yield! projOpts.OtherOptions
+                    yield! proj_opts.OtherOptions
                     $"--out:output.dll"
                     yield!
-                        (projOpts.ReferencedProjects |> Array.map (fun v -> v.OutputFile))
-                    yield! filteredSourceFiles
+                        (proj_opts.ReferencedProjects |> Array.map (fun v -> v.OutputFile))
+                    yield! proj_opts.SourceFiles
                 |]
             )
 
-        match exitCode with
+        match exit_code with
         | None ->
             let assembly = memoryFS.InMemoryStream.ToArray()
             FSharp.Compiler.IO.FileSystemAutoOpens.FileSystem <- defaultFS
-            return projOpts, assembly
+            return proj_opts, assembly
         | Some exn ->
-            compileResult |> Array.iter (fun v -> stdout.WriteLine $"%A{v}")
+            compile_result |> Array.iter (fun v -> stdout.WriteLine $"%A{v}")
             return raise exn
     }
 
-let tryCompileProjectInMemory
+let try_compile_proj
     (opts: Options)
-    (projOpts: Ionide.ProjInfo.Types.ProjectOptions)
+    (proj_opts: Ionide.ProjInfo.Types.ProjectOptions)
+    (checker: FSharpChecker)
     =
-    let defaultFS = FSharp.Compiler.IO.FileSystemAutoOpens.FileSystem
-    let memoryFS = MemoryFileSystem()
-    FSharp.Compiler.IO.FileSystemAutoOpens.FileSystem <- memoryFS
-    let checker = FSharpChecker.Create()
+    let default_fs = FSharp.Compiler.IO.FileSystemAutoOpens.FileSystem
+    let memory_fs = MemoryFileSystem()
+    FSharp.Compiler.IO.FileSystemAutoOpens.FileSystem <- memory_fs
 
     task {
-        let filteredSourceFiles = projOpts.SourceFiles
 
-        let! compileResult, exitCode =
+
+        let! compile_result, exit_code =
             checker.Compile(
                 [|
-                    "filename.fsx"
+                    "fsc.exe"
                     $"--target:{opts.target}"
-                    "--debug-"
+                    // "--debug-"
                     "--optimize-"
                     "--nowin32manifest"
-                    yield! projOpts.OtherOptions
+                    yield! proj_opts.OtherOptions
                     $"--out:output.dll"
-                    yield!
-                        (projOpts.ReferencedProjects
-                         |> Seq.map (fun v -> v.ProjectFileName))
-                    yield! filteredSourceFiles
+                    // todo: put other project refs here?
+                    yield! proj_opts.SourceFiles
                 |]
             )
 
-        match exitCode with
+        match exit_code with
         | None ->
-            let assembly = memoryFS.InMemoryStream.ToArray()
-            FSharp.Compiler.IO.FileSystemAutoOpens.FileSystem <- defaultFS
+            let assembly = memory_fs.InMemoryStream.ToArray()
+            FSharp.Compiler.IO.FileSystemAutoOpens.FileSystem <- default_fs
 
             return {|
                 assembly = assembly
-                projOpts = projOpts
+                projOpts = proj_opts
             |}
         | Some exn ->
-            compileResult |> Array.iter (fun v -> stdout.WriteLine $"%A{v}")
+            compile_result |> Array.iter (fun v -> stdout.WriteLine $"%A{v}")
             return raise exn
     }
 
 let copy_dlls_to_output
     (dest_folder: string)
-    (otherOptions: string seq)
+    (other_options: string seq)
+    (referenced_projects: string seq)
     : System.Threading.Tasks.Task =
     task {
-        for opt in otherOptions do
+        for opt in other_options do
             if not (opt.StartsWith("-r:")) then
                 ()
             else if (opt.StartsWith(dotnet_packs_ref)) then
@@ -244,6 +239,16 @@ let copy_dlls_to_output
                 File.Delete(dest_path)
 
             File.CreateSymbolicLink(dest_path, assembly_path) |> ignore
+
+        // replace obj/ references with real references
+        for rp in referenced_projects do
+            let nameonly = Path.GetFileName(rp)
+            let dest_path = Path.Combine(dest_folder, nameonly)
+
+            if File.Exists(dest_path) then
+                File.Delete(dest_path)
+
+            File.CreateSymbolicLink(dest_path, rp) |> ignore
     }
 
 
@@ -257,27 +262,56 @@ let main argv =
     Directory.CreateDirectory(dest_path) |> ignore
     let watch = System.Diagnostics.Stopwatch.StartNew()
 
-    let startup_msg() =
+    let inline startup_msg() =
         stdout.WriteLine $"target={opts.target}"
 
     match opts.file_path with
     | Some path when path.EndsWith(".fsproj") ->
-        let toolsPath = Msbuild.toolsPath path
-        let loader = Msbuild.graphLoader toolsPath
-        let projectOptionList = loader.LoadProjects([ path ]) |> Seq.toArray
+        let proj_full_path = Path.GetFullPath(path)
+        let tools_path = Msbuild.tools_path path
+        let loader = Msbuild.graph_loader tools_path
+        let proj_option_list = loader.LoadProjects([ path ]) |> Seq.toArray
         let scriptname = Path.GetFileNameWithoutExtension(path)
         let runtimeconf_path = Path.Combine(dest_path, $"{scriptname}.runtimeconfig.json")
         startup_msg ()
 
-        if projectOptionList.Length <> 1 then
-            let names = projectOptionList |> Array.map (fun v -> v.ProjectFileName)
-            stdout.WriteLine $"expected 1 project, got %A{names}"
+        let project_file_names =
+            proj_option_list |> Array.map (fun v -> v.ProjectFileName)
 
-        let projOpts = projectOptionList[0]
+        // todo: this has all the referenced projects
+        // but we're only compiling the current one
+        let proj_opts =
+            proj_option_list
+            |> Array.tryFind (fun v ->
+                Path.GetFullPath(v.ProjectFileName) = proj_full_path)
+            |> Option.defaultWith (fun _ ->
+                failwith
+                    $"expected to find: {proj_full_path}, found: %A{project_file_names}")
+
+        let referenced_projects =
+            proj_option_list
+            |> Array.choose (fun v ->
+                match Path.GetFullPath(v.ProjectFileName) <> proj_full_path with
+                | true -> Some v.TargetPath
+                | _ -> None)
+
+        let filter_options(projOtherOptions: string list) = [
+            for p in projOtherOptions do
+                if p.StartsWith("-o:") then
+                    ()
+                // if p.Contains("/obj/") then
+                //     ()
+                // else
+                p
+        ]
+
+        let checker = FSharpChecker.Create(useTransparentCompiler = true)
 
         let compile_project() =
             task {
-                let! result = tryCompileProjectInMemory opts projOpts
+                do! stdout.WriteAsync ".."
+                watch.Start()
+                let! result = try_compile_proj opts proj_opts checker
                 let prog = Path.Combine(dest_path, $"{scriptname}.dll")
 
                 do!
@@ -287,7 +321,10 @@ let main argv =
                                 opts.target = "exe" && not (File.Exists(runtimeconf_path))
                             then
                                 File.WriteAllBytesAsync(runtimeconf_path, runtimeconfig)
-                            copy_dlls_to_output dest_path (projOpts.OtherOptions)
+                            copy_dlls_to_output
+                                dest_path
+                                (filter_options proj_opts.OtherOptions)
+                                referenced_projects
                             File.WriteAllBytesAsync(prog, result.assembly)
                         |]
                     )
@@ -299,8 +336,6 @@ let main argv =
                 if opts.target = "exe" then
                     use ps = System.Diagnostics.Process.Start("dotnet", prog)
                     do! ps.WaitForExitAsync()
-
-                ()
             }
 
         compile_project().Wait()
@@ -312,17 +347,17 @@ let main argv =
         let scriptname = Path.GetFileNameWithoutExtension(path)
         let runtimeconf_path = Path.Combine(dest_path, $"{scriptname}.runtimeconfig.json")
         startup_msg ()
+        let checker = FSharpChecker.Create(useTransparentCompiler = true)
 
         let compile_script() =
             task {
                 do! stdout.WriteAsync ".."
-
                 watch.Start()
 
                 let! str = File.ReadAllTextAsync(path)
 
                 let! projOpts, assembly =
-                    tryCompileScriptInMemory opts path (SourceText.ofString (str))
+                    try_compile_script opts path (SourceText.ofString (str)) checker
 
                 let prog = Path.Combine(dest_path, $"{scriptname}.dll")
 
@@ -334,7 +369,7 @@ let main argv =
                                 opts.target = "exe" && not (File.Exists(runtimeconf_path))
                             then
                                 File.WriteAllBytesAsync(runtimeconf_path, runtimeconfig)
-                            copy_dlls_to_output dest_path (projOpts.OtherOptions)
+                            copy_dlls_to_output dest_path (projOpts.OtherOptions) []
                             File.WriteAllBytesAsync(prog, assembly)
                         |]
                     )
