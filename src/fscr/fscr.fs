@@ -115,7 +115,7 @@ type MemoryFileSystem() =
         // stdout.WriteLine $"open_file: {filePath}, {mode}"
 
         if filePath.EndsWith(".pdb") then
-            this.PdbStream
+            MemoryStream.Null
         else
             match mode with
             | Some(FileMode.Create) ->
@@ -194,12 +194,11 @@ let try_compile_proj
                 [|
                     "fsc.exe"
                     $"--target:{opts.target}"
-                    // "--debug-"
+                    "--debug-"
                     "--optimize-"
                     "--nowin32manifest"
                     yield! proj_opts.OtherOptions
                     $"--out:output.dll"
-                    // todo: put other project refs here?
                     yield! proj_opts.SourceFiles
                 |]
             )
@@ -252,6 +251,10 @@ let copy_dlls_to_output
     }
 
 
+module FCS =
+    let createChecker() =
+        FSharpChecker.Create(useTransparentCompiler = true)
+
 [<EntryPoint>]
 let main argv =
     if Array.contains "--help" argv then
@@ -299,13 +302,23 @@ let main argv =
             for p in projOtherOptions do
                 if p.StartsWith("-o:") then
                     ()
+
+                if p.StartsWith("--debug:") then
+                    ()
+                else
+
+                if p.StartsWith("-r:/home/ian/.dotnet/packs") then
+                    ()
+                else
+
+                stdout.WriteLine p
                 // if p.Contains("/obj/") then
                 //     ()
                 // else
                 p
         ]
 
-        let checker = FSharpChecker.Create(useTransparentCompiler = true)
+        let checker = FCS.createChecker ()
 
         let compile_project() =
             task {
