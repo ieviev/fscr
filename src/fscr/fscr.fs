@@ -6,17 +6,24 @@ open FSharp.Compiler.Text
 open FSharp.Compiler.Syntax
 open FSharp.Compiler.Symbols
 open System.Reflection
+open System.Threading.Tasks
+
+module NewModule =
+    let someinteger = 123456
 
 module Msbuild =
     open Ionide.ProjInfo
 
     let tools_path(fsproj_path: string) =
         let dirname = Path.GetDirectoryName(fsproj_path)
+
+
         let dir = DirectoryInfo(dirname)
         Init.init dir None
 
     let graph_loader(tools_path) : IWorkspaceLoader =
         WorkspaceLoaderViaProjectGraph.Create(tools_path, [])
+
 
 [<AutoOpen>]
 module Helpers =
@@ -31,7 +38,7 @@ module Helpers =
     let dotnet_packs_ref = "-r:" + Path.Combine(dotnet_root, "packs")
 
     let runtimeconfig =
-        """{ "runtimeOptions": { "tfm": "net9.0", "framework": { "name": "Microsoft.NETCore.App", "version": "9.0.0" }, "configProperties": { "System.Runtime.Serialization.EnableUnsafeBinaryFormatterSerialization": false } } }"""
+        """{ "runtimeOptions": { "tfm": "net10.0", "framework": { "name": "Microsoft.NETCore.App", "version": "10.0.0" }, "configProperties": { "System.Runtime.Serialization.EnableUnsafeBinaryFormatterSerialization": false } } }"""
         |> System.Text.Encoding.UTF8.GetBytes
 
     let nuget_cache_path =
@@ -64,7 +71,7 @@ module Helpers =
     let watch_file (watcher: FileSystemWatcher) (hook: unit -> Task<unit>) =
         let mutable nextproc = DateTimeOffset.Now
 
-        task {
+        backgroundTask {
             while true do
                 let _ = watcher.WaitForChanged(WatcherChangeTypes.Changed)
 
@@ -78,7 +85,6 @@ module Helpers =
 
                     nextproc <- (nextproc.AddSeconds(time_between_s))
         }
-        |> (fun v -> v.GetAwaiter().GetResult())
 
 
     type Options = {
@@ -110,6 +116,9 @@ module Helpers =
 
         acc
 
+    let unix_ms() =
+        System.DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+
 
 type MemoryFileSystem() =
     inherit FSharp.Compiler.IO.DefaultFileSystem()
@@ -119,7 +128,6 @@ type MemoryFileSystem() =
 
     override this.OpenFileForWriteShim(filePath, mode, _, _) =
         // stdout.WriteLine $"open_file: {filePath}, {mode}"
-
         if filePath.EndsWith(".pdb") then
             MemoryStream.Null
         else
@@ -193,7 +201,7 @@ let try_compile_proj
     FSharp.Compiler.IO.FileSystemAutoOpens.FileSystem <- memory_fs
 
     task {
-
+        let outname = Path.GetFileName proj_opts.TargetPath
 
         let! compile_result, exit_code =
             checker.Compile(
@@ -204,7 +212,7 @@ let try_compile_proj
                     "--optimize-"
                     "--nowin32manifest"
                     yield! proj_opts.OtherOptions
-                    $"--out:output.dll"
+                    $"--out:{outname}"
                     yield! proj_opts.SourceFiles
                 |]
             )
@@ -264,6 +272,7 @@ module FCS =
             parallelReferenceResolution = true
         )
 
+
     let wait_for_tasks
         (opts: Options)
         (runtimeconf_path: string)
@@ -298,48 +307,45 @@ module FCS =
 
 [<EntryPoint>]
 let main argv =
-    let opts = parse_options Options.Default argv
+    let main_opts = parse_options Options.Default argv
 
-    if opts.file_path.IsNone then
+    if main_opts.file_path.IsNone then
         stderr.WriteLine $"usage: fscr [-t exe|library] <script.fsx> [args]"
         exit 1
 
-    let dest_path = "bin/"
-    Directory.CreateDirectory(dest_path) |> ignore
+    let main_dest_path = "bin/"
+    Directory.CreateDirectory(main_dest_path) |> ignore
     let watch = System.Diagnostics.Stopwatch.StartNew()
 
-    stdout.WriteLine $"target={opts.target}; args=%A{opts.args.ToArray()}"
-    let path = opts.file_path.Value
+    stdout.WriteLine $"target={main_opts.target}; args=%A{main_opts.args.ToArray()}"
+    let path = main_opts.file_path.Value
     let scriptname = Path.GetFileNameWithoutExtension(path)
-    let runtimeconf_path = Path.Combine(dest_path, $"{scriptname}.runtimeconfig.json")
+
+    let runtimeconf_path =
+        Path.Combine(main_dest_path, $"{scriptname}.runtimeconfig.json")
+
     let checker = FCS.create_checker ()
 
-    match opts.file_path with
+    match main_opts.file_path with
     | Some path when path.EndsWith(".fsproj") ->
         let proj_full_path = Path.GetFullPath(path)
-        let tools_path = Msbuild.tools_path path
+        let tools_path = Msbuild.tools_path proj_full_path
         let loader = Msbuild.graph_loader tools_path
-        let proj_option_list = loader.LoadProjects([ path ]) |> Seq.toArray
+        let main_proj_option_list = loader.LoadProjects([ proj_full_path ]) |> Seq.toArray
 
         let project_file_names =
-            proj_option_list |> Array.map (fun v -> v.ProjectFileName)
+            main_proj_option_list |> Array.map (fun v -> v.ProjectFileName)
 
         // todo: this has all the referenced projects
         // but we're only compiling the current one
         let proj_opts =
-            proj_option_list
+            main_proj_option_list
             |> Array.tryFind (fun v ->
                 Path.GetFullPath(v.ProjectFileName) = proj_full_path)
             |> Option.defaultWith (fun _ ->
                 failwith
                     $"expected to find: {proj_full_path}, found: %A{project_file_names}")
 
-        let referenced_projects =
-            proj_option_list
-            |> Array.choose (fun v ->
-                match Path.GetFullPath(v.ProjectFileName) <> proj_full_path with
-                | true -> Some v.TargetPath
-                | _ -> None)
 
         let filter_options(projOtherOptions: string list) = [
             for p in projOtherOptions do
@@ -349,38 +355,79 @@ let main argv =
                 if p.StartsWith("--debug:") then () else p
         ]
 
+        let compile_project_reference(p_info: Ionide.ProjInfo.Types.ProjectOptions) =
+            task {
+                let opts = {
+                    main_opts with
+                        target = "library"
+                        args = ResizeArray()
+                }
+
+                do! stdout.WriteAsync ".."
+                let start = unix_ms ()
+
+                let pops =
+                    main_proj_option_list
+                    |> Array.find (fun v ->
+                        Path.GetFullPath(v.ProjectFileName) = p_info.ProjectFileName)
+
+                let! result = try_compile_proj opts pops checker
+                do! File.WriteAllBytesAsync(p_info.TargetPath, result.assembly)
+                do! stdout.WriteLineAsync $"{unix_ms () - start}ms"
+                let prog = Path.Combine(main_dest_path, $"{scriptname}.dll")
+                do! FCS.try_run_exe main_opts prog
+            }
 
         let compile_project() =
             task {
                 do! stdout.WriteAsync ".."
-                watch.Start()
-                let! result = try_compile_proj opts proj_opts checker
-                let prog = Path.Combine(dest_path, $"{scriptname}.dll")
+                let start = unix_ms ()
+                let! result = try_compile_proj main_opts proj_opts checker
+                let prog = Path.Combine(main_dest_path, $"{scriptname}.dll")
+
+                let referenced_projects =
+                    main_proj_option_list
+                    |> Array.choose (fun v ->
+                        match Path.GetFullPath(v.ProjectFileName) <> proj_full_path with
+                        | true -> Some v.TargetPath
+                        | _ -> None)
 
                 do!
                     FCS.wait_for_tasks
-                        opts
+                        main_opts
                         runtimeconf_path
-                        dest_path
+                        main_dest_path
                         (filter_options proj_opts.OtherOptions)
                         referenced_projects
                         prog
                         result.assembly
 
-                watch.Stop()
-                do! stdout.WriteLineAsync $" {watch.ElapsedMilliseconds}ms"
-                watch.Reset()
-
-                do! FCS.try_run_exe opts prog
+                do! stdout.WriteLineAsync $" {unix_ms () - start}ms"
+                do! FCS.try_run_exe main_opts prog
             }
 
         compile_project().Wait()
-        let watcher = create_fs_watcher (Path.GetDirectoryName(path))
-        watch_file watcher (fun _ -> compile_project ())
+
+        let references =
+            main_proj_option_list
+            |> Array.choose (fun v ->
+                match Path.GetFullPath(v.ProjectFileName) <> proj_full_path with
+                | true -> Some(v)
+                | _ -> None)
+        // watch references as well
+        for p in references do
+            let watcher = create_fs_watcher (Path.GetDirectoryName(p.ProjectFileName))
+
+            Task.Factory.StartNew(fun _ ->
+                watch_file watcher (fun _ -> compile_project_reference (p)))
+            |> ignore
+
+        let watcher = create_fs_watcher (Path.GetDirectoryName(proj_full_path))
+        watch_file watcher (fun _ -> compile_project ()) |> ignore
+        let resetevent = new System.Threading.ManualResetEvent(false)
+        resetevent.WaitOne() |> ignore
 
     | Some path when path.EndsWith(".fsx") ->
-
-
         let compile_script() =
             task {
                 do! stdout.WriteAsync ".."
@@ -389,15 +436,15 @@ let main argv =
                 let! str = File.ReadAllTextAsync(path)
 
                 let! projOpts, assembly =
-                    try_compile_script opts path (SourceText.ofString (str)) checker
+                    try_compile_script main_opts path (SourceText.ofString (str)) checker
 
-                let prog = Path.Combine(dest_path, $"{scriptname}.dll")
+                let prog = Path.Combine(main_dest_path, $"{scriptname}.dll")
 
                 do!
                     FCS.wait_for_tasks
-                        opts
+                        main_opts
                         runtimeconf_path
-                        dest_path
+                        main_dest_path
                         projOpts.OtherOptions
                         []
                         prog
@@ -407,14 +454,16 @@ let main argv =
                 do! stdout.WriteLineAsync $" {watch.ElapsedMilliseconds}ms"
                 watch.Reset()
 
-                if opts.target = "exe" then
+                if main_opts.target = "exe" then
                     use ps = System.Diagnostics.Process.Start("dotnet", prog)
                     do! ps.WaitForExitAsync()
             }
 
         compile_script().Wait()
         let watcher = create_fsx_watcher (path)
-        watch_file watcher (fun _ -> compile_script ())
+        watch_file watcher (fun _ -> compile_script ()) |> ignore
+        let resetevent = new System.Threading.ManualResetEvent(false)
+        resetevent.WaitOne() |> ignore
     | _ -> failwith "expecting .fsx or .fsproj"
 
     0

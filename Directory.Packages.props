@@ -3,8 +3,8 @@
         <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
     </PropertyGroup>
     <ItemGroup>
-        <PackageVersion Include="FSharp.Compiler.Service" Version="43.9.202" />
-        <PackageVersion Include="Ionide.ProjInfo.FCS" Version="0.70.2" />
+        <PackageVersion Include="FSharp.Compiler.Service" Version="43.10.102" />
+        <PackageVersion Include="Ionide.ProjInfo.FCS" Version="0.74.1" />
         <PackageVersion Include="BenchmarkDotnet" Version="0.14.0" />
         <PackageVersion Include="Expecto" Version="10.2.3" />
     </ItemGroup>

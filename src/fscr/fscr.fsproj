@@ -11,5 +11,4 @@
         <PackageReference Include="FSharp.Compiler.Service" />
         <PackageReference Include="Ionide.ProjInfo.FCS" />
     </ItemGroup>
-
 </Project>
