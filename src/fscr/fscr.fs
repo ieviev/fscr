@@ -8,9 +8,6 @@ open FSharp.Compiler.Symbols
 open System.Reflection
 open System.Threading.Tasks
 
-module NewModule =
-    let someinteger = 123456
-
 module Msbuild =
     open Ionide.ProjInfo
 
