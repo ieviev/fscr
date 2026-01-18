@@ -1,18 +1,15 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+    </PropertyGroup>
 
-  <PropertyGroup>
-    <DisableImplicitFSharpCoreReference>true</DisableImplicitFSharpCoreReference>
-    <TargetFramework>net9.0</TargetFramework>
-    <OutputType>Exe</OutputType>
-  </PropertyGroup>
+    <ItemGroup>
+        <Compile Include="fscr.fs" />
+    </ItemGroup>
 
-  <ItemGroup>
-    <Compile Include="fscr.fs" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <PackageReference Include="FSharp.Compiler.Service" Version="43.9.202" />
-    <PackageReference Include="Ionide.ProjInfo.FCS" Version="0.70.2" />
-  </ItemGroup>
+    <ItemGroup>
+        <PackageReference Include="FSharp.Compiler.Service" />
+        <PackageReference Include="Ionide.ProjInfo.FCS" />
+    </ItemGroup>
 
 </Project>
